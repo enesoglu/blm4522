@@ -1,0 +1,8 @@
+2026-06-09 18:10:53.031 +03 [6372] LOG:  redirecting log output to logging collector process
+2026-06-09 18:10:53.031 +03 [6372] HINT:  Future log output will appear in directory "C:/Users/yildi/projects_db/blm4522/artifacts/proje2/logs".
+C:Usersyildiprojects_dblm4522artifactsproje2wal_archive00000002.history 
+        0 file(s) copied.
+C:Usersyildiprojects_dblm4522artifactsproje2wal_archive00000001000000000000000D 
+        0 file(s) copied.
+C:Usersyildiprojects_dblm4522artifactsproje2wal_archive00000001000000000000000E 
+        0 file(s) copied.

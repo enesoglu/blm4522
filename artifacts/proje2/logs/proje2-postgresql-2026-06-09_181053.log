@@ -1,0 +1,19 @@
+2026-06-09 18:10:53.031 +03 [6372] LOG:  starting PostgreSQL 18.3 on x86_64-windows, compiled by msvc-19.44.35225, 64-bit
+2026-06-09 18:10:53.035 +03 [6372] LOG:  listening on IPv6 address "::1", port 55433
+2026-06-09 18:10:53.035 +03 [6372] LOG:  listening on IPv4 address "127.0.0.1", port 55433
+2026-06-09 18:10:53.086 +03 [29220] LOG:  database system was interrupted; last known up at 2026-06-09 18:09:11 +03
+Dosya adç, dizin adç veya birim etiketi sîzdizimi hatalç.
+2026-06-09 18:10:56.056 +03 [29220] LOG:  starting backup recovery with redo LSN 0/D000028, checkpoint LSN 0/D000080, on timeline ID 1
+Dosya adç, dizin adç veya birim etiketi sîzdizimi hatalç.
+2026-06-09 18:10:56.086 +03 [29220] LOG:  starting point-in-time recovery to 2026-06-09 18:05:44.411657+03
+2026-06-09 18:10:56.098 +03 [29220] LOG:  redo starts at 0/D000028
+2026-06-09 18:10:56.109 +03 [29220] LOG:  completed backup recovery with redo LSN 0/D000028 and end LSN 0/D000120
+2026-06-09 18:10:56.109 +03 [29220] LOG:  consistent recovery state reached at 0/D000120
+2026-06-09 18:10:56.110 +03 [6372] LOG:  database system is ready to accept read-only connections
+Dosya adç, dizin adç veya birim etiketi sîzdizimi hatalç.
+2026-06-09 18:10:56.131 +03 [29220] LOG:  redo done at 0/D000120 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.03 s
+2026-06-09 18:10:56.131 +03 [29220] FATAL:  recovery ended before configured recovery target was reached
+2026-06-09 18:10:56.137 +03 [6372] LOG:  startup process (PID 29220) exited with exit code 1
+2026-06-09 18:10:56.137 +03 [6372] LOG:  terminating any other active server processes
+2026-06-09 18:10:56.144 +03 [6372] LOG:  shutting down due to startup process failure
+2026-06-09 18:10:56.147 +03 [6372] LOG:  database system is shut down

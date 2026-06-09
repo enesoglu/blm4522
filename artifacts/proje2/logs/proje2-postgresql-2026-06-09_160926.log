@@ -1,0 +1,1894 @@
+2026-06-09 16:09:26.480 +03 [37736] LOG:  starting PostgreSQL 18.3 on x86_64-windows, compiled by msvc-19.44.35225, 64-bit
+2026-06-09 16:09:26.493 +03 [37736] LOG:  listening on IPv6 address "::1", port 55432
+2026-06-09 16:09:26.493 +03 [37736] LOG:  listening on IPv4 address "127.0.0.1", port 55432
+2026-06-09 16:09:26.559 +03 [2188] LOG:  database system was shut down at 2026-06-09 16:08:18 +03
+2026-06-09 16:09:26.568 +03 [37736] LOG:  database system is ready to accept connections
+2026-06-09 16:10:45.705 +03 [30016] LOG:  statement: DROP DATABASE IF EXISTS dvdrental;
+2026-06-09 16:10:45.705 +03 [30016] LOG:  statement: CREATE DATABASE dvdrental WITH TEMPLATE = template0 ENCODING = 'UTF8' LC_COLLATE = 'C' LC_CTYPE = 'C';
+2026-06-09 16:10:45.990 +03 [30016] LOG:  statement: ALTER DATABASE dvdrental OWNER TO postgres;
+2026-06-09 16:10:46.044 +03 [35632] LOG:  statement: CREATE TYPE public.mpaa_rating AS ENUM (
+	    'G',
+	    'PG',
+	    'PG-13',
+	    'R',
+	    'NC-17'
+	);
+2026-06-09 16:10:46.050 +03 [35632] LOG:  statement: ALTER TYPE public.mpaa_rating OWNER TO postgres;
+2026-06-09 16:10:46.050 +03 [35632] LOG:  statement: CREATE DOMAIN public.year AS integer
+		CONSTRAINT year_check CHECK (((VALUE >= 1901) AND (VALUE <= 2155)));
+2026-06-09 16:10:46.052 +03 [35632] LOG:  statement: ALTER DOMAIN public.year OWNER TO postgres;
+2026-06-09 16:10:46.052 +03 [35632] LOG:  statement: CREATE FUNCTION public._group_concat(text, text) RETURNS text
+	    LANGUAGE sql IMMUTABLE
+	    AS $_$
+	SELECT CASE
+	  WHEN $2 IS NULL THEN $1
+	  WHEN $1 IS NULL THEN $2
+	  ELSE $1 || ', ' || $2
+	END
+	$_$;
+2026-06-09 16:10:46.055 +03 [35632] LOG:  statement: ALTER FUNCTION public._group_concat(text, text) OWNER TO postgres;
+2026-06-09 16:10:46.055 +03 [35632] LOG:  statement: CREATE FUNCTION public.film_in_stock(p_film_id integer, p_store_id integer, OUT p_film_count integer) RETURNS SETOF integer
+	    LANGUAGE sql
+	    AS $_$
+	     SELECT inventory_id
+	     FROM inventory
+	     WHERE film_id = $1
+	     AND store_id = $2
+	     AND inventory_in_stock(inventory_id);
+	$_$;
+2026-06-09 16:10:46.055 +03 [35632] LOG:  statement: ALTER FUNCTION public.film_in_stock(p_film_id integer, p_store_id integer, OUT p_film_count integer) OWNER TO postgres;
+2026-06-09 16:10:46.055 +03 [35632] LOG:  statement: CREATE FUNCTION public.film_not_in_stock(p_film_id integer, p_store_id integer, OUT p_film_count integer) RETURNS SETOF integer
+	    LANGUAGE sql
+	    AS $_$
+	    SELECT inventory_id
+	    FROM inventory
+	    WHERE film_id = $1
+	    AND store_id = $2
+	    AND NOT inventory_in_stock(inventory_id);
+	$_$;
+2026-06-09 16:10:46.056 +03 [35632] LOG:  statement: ALTER FUNCTION public.film_not_in_stock(p_film_id integer, p_store_id integer, OUT p_film_count integer) OWNER TO postgres;
+2026-06-09 16:10:46.056 +03 [35632] LOG:  statement: CREATE FUNCTION public.get_customer_balance(p_customer_id integer, p_effective_date timestamp without time zone) RETURNS numeric
+	    LANGUAGE plpgsql
+	    AS $$
+	       --#OK, WE NEED TO CALCULATE THE CURRENT BALANCE GIVEN A CUSTOMER_ID AND A DATE
+	       --#THAT WE WANT THE BALANCE TO BE EFFECTIVE FOR. THE BALANCE IS:
+	       --#   1) RENTAL FEES FOR ALL PREVIOUS RENTALS
+	       --#   2) ONE DOLLAR FOR EVERY DAY THE PREVIOUS RENTALS ARE OVERDUE
+	       --#   3) IF A FILM IS MORE THAN RENTAL_DURATION * 2 OVERDUE, CHARGE THE REPLACEMENT_COST
+	       --#   4) SUBTRACT ALL PAYMENTS MADE BEFORE THE DATE SPECIFIED
+	DECLARE
+	    v_rentfees DECIMAL(5,2); --#FEES PAID TO RENT THE VIDEOS INITIALLY
+	    v_overfees INTEGER;      --#LATE FEES FOR PRIOR RENTALS
+	    v_payments DECIMAL(5,2); --#SUM OF PAYMENTS MADE PREVIOUSLY
+	BEGIN
+	    SELECT COALESCE(SUM(film.rental_rate),0) INTO v_rentfees
+	    FROM film, inventory, rental
+	    WHERE film.film_id = inventory.film_id
+	      AND inventory.inventory_id = rental.inventory_id
+	      AND rental.rental_date <= p_effective_date
+	      AND rental.customer_id = p_customer_id;
+	
+	    SELECT COALESCE(SUM(IF((rental.return_date - rental.rental_date) > (film.rental_duration * '1 day'::interval),
+	        ((rental.return_date - rental.rental_date) - (film.rental_duration * '1 day'::interval)),0)),0) INTO v_overfees
+	    FROM rental, inventory, film
+	    WHERE film.film_id = inventory.film_id
+	      AND inventory.inventory_id = rental.inventory_id
+	      AND rental.rental_date <= p_effective_date
+	      AND rental.customer_id = p_customer_id;
+	
+	    SELECT COALESCE(SUM(payment.amount),0) INTO v_payments
+	    FROM payment
+	    WHERE payment.payment_date <= p_effective_date
+	    AND payment.customer_id = p_customer_id;
+	
+	    RETURN v_rentfees + v_overfees - v_payments;
+	END
+	$$;
+2026-06-09 16:10:46.057 +03 [35632] LOG:  statement: ALTER FUNCTION public.get_customer_balance(p_customer_id integer, p_effective_date timestamp without time zone) OWNER TO postgres;
+2026-06-09 16:10:46.057 +03 [35632] LOG:  statement: CREATE FUNCTION public.inventory_held_by_customer(p_inventory_id integer) RETURNS integer
+	    LANGUAGE plpgsql
+	    AS $$
+	DECLARE
+	    v_customer_id INTEGER;
+	BEGIN
+	
+	  SELECT customer_id INTO v_customer_id
+	  FROM rental
+	  WHERE return_date IS NULL
+	  AND inventory_id = p_inventory_id;
+	
+	  RETURN v_customer_id;
+	END $$;
+2026-06-09 16:10:46.057 +03 [35632] LOG:  statement: ALTER FUNCTION public.inventory_held_by_customer(p_inventory_id integer) OWNER TO postgres;
+2026-06-09 16:10:46.058 +03 [35632] LOG:  statement: CREATE FUNCTION public.inventory_in_stock(p_inventory_id integer) RETURNS boolean
+	    LANGUAGE plpgsql
+	    AS $$
+	DECLARE
+	    v_rentals INTEGER;
+	    v_out     INTEGER;
+	BEGIN
+	    -- AN ITEM IS IN-STOCK IF THERE ARE EITHER NO ROWS IN THE rental TABLE
+	    -- FOR THE ITEM OR ALL ROWS HAVE return_date POPULATED
+	
+	    SELECT count(*) INTO v_rentals
+	    FROM rental
+	    WHERE inventory_id = p_inventory_id;
+	
+	    IF v_rentals = 0 THEN
+	      RETURN TRUE;
+	    END IF;
+	
+	    SELECT COUNT(rental_id) INTO v_out
+	    FROM inventory LEFT JOIN rental USING(inventory_id)
+	    WHERE inventory.inventory_id = p_inventory_id
+	    AND rental.return_date IS NULL;
+	
+	    IF v_out > 0 THEN
+	      RETURN FALSE;
+	    ELSE
+	      RETURN TRUE;
+	    END IF;
+	END $$;
+2026-06-09 16:10:46.058 +03 [35632] LOG:  statement: ALTER FUNCTION public.inventory_in_stock(p_inventory_id integer) OWNER TO postgres;
+2026-06-09 16:10:46.058 +03 [35632] LOG:  statement: CREATE FUNCTION public.last_day(timestamp without time zone) RETURNS date
+	    LANGUAGE sql IMMUTABLE STRICT
+	    AS $_$
+	  SELECT CASE
+	    WHEN EXTRACT(MONTH FROM $1) = 12 THEN
+	      (((EXTRACT(YEAR FROM $1) + 1) operator(pg_catalog.||) '-01-01')::date - INTERVAL '1 day')::date
+	    ELSE
+	      ((EXTRACT(YEAR FROM $1) operator(pg_catalog.||) '-' operator(pg_catalog.||) (EXTRACT(MONTH FROM $1) + 1) operator(pg_catalog.||) '-01')::date - INTERVAL '1 day')::date
+	    END
+	$_$;
+2026-06-09 16:10:46.059 +03 [35632] LOG:  statement: ALTER FUNCTION public.last_day(timestamp without time zone) OWNER TO postgres;
+2026-06-09 16:10:46.059 +03 [35632] LOG:  statement: CREATE FUNCTION public.last_updated() RETURNS trigger
+	    LANGUAGE plpgsql
+	    AS $$
+	BEGIN
+	    NEW.last_update = CURRENT_TIMESTAMP;
+	    RETURN NEW;
+	END $$;
+2026-06-09 16:10:46.059 +03 [35632] LOG:  statement: ALTER FUNCTION public.last_updated() OWNER TO postgres;
+2026-06-09 16:10:46.059 +03 [35632] LOG:  statement: CREATE SEQUENCE public.customer_customer_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.063 +03 [35632] LOG:  statement: ALTER TABLE public.customer_customer_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.064 +03 [35632] LOG:  statement: CREATE TABLE public.customer (
+	    customer_id integer DEFAULT nextval('public.customer_customer_id_seq'::regclass) NOT NULL,
+	    store_id smallint NOT NULL,
+	    first_name character varying(45) NOT NULL,
+	    last_name character varying(45) NOT NULL,
+	    email character varying(50),
+	    address_id smallint NOT NULL,
+	    activebool boolean DEFAULT true NOT NULL,
+	    create_date date DEFAULT ('now'::text)::date NOT NULL,
+	    last_update timestamp without time zone DEFAULT now(),
+	    active integer
+	);
+2026-06-09 16:10:46.069 +03 [35632] LOG:  statement: ALTER TABLE public.customer OWNER TO postgres;
+2026-06-09 16:10:46.069 +03 [35632] LOG:  statement: CREATE FUNCTION public.rewards_report(min_monthly_purchases integer, min_dollar_amount_purchased numeric) RETURNS SETOF public.customer
+	    LANGUAGE plpgsql SECURITY DEFINER
+	    AS $_$
+	DECLARE
+	    last_month_start DATE;
+	    last_month_end DATE;
+	rr RECORD;
+	tmpSQL TEXT;
+	BEGIN
+	
+	    /* Some sanity checks... */
+	    IF min_monthly_purchases = 0 THEN
+	        RAISE EXCEPTION 'Minimum monthly purchases parameter must be > 0';
+	    END IF;
+	    IF min_dollar_amount_purchased = 0.00 THEN
+	        RAISE EXCEPTION 'Minimum monthly dollar amount purchased parameter must be > $0.00';
+	    END IF;
+	
+	    last_month_start := CURRENT_DATE - '3 month'::interval;
+	    last_month_start := to_date((extract(YEAR FROM last_month_start) || '-' || extract(MONTH FROM last_month_start) || '-01'),'YYYY-MM-DD');
+	    last_month_end := LAST_DAY(last_month_start);
+	
+	    /*
+	    Create a temporary storage area for Customer IDs.
+	    */
+	    CREATE TEMPORARY TABLE tmpCustomer (customer_id INTEGER NOT NULL PRIMARY KEY);
+	
+	    /*
+	    Find all customers meeting the monthly purchase requirements
+	    */
+	
+	    tmpSQL := 'INSERT INTO tmpCustomer (customer_id)
+	        SELECT p.customer_id
+	        FROM payment AS p
+	        WHERE DATE(p.payment_date) BETWEEN '||quote_literal(last_month_start) ||' AND '|| quote_literal(last_month_end) || '
+	        GROUP BY customer_id
+	        HAVING SUM(p.amount) > '|| min_dollar_amount_purchased || '
+	        AND COUNT(customer_id) > ' ||min_monthly_purchases ;
+	
+	    EXECUTE tmpSQL;
+	
+	    /*
+	    Output ALL customer information of matching rewardees.
+	    Customize output as needed.
+	    */
+	    FOR rr IN EXECUTE 'SELECT c.* FROM tmpCustomer AS t INNER JOIN customer AS c ON t.customer_id = c.customer_id' LOOP
+	        RETURN NEXT rr;
+	    END LOOP;
+	
+	    /* Clean up */
+	    tmpSQL := 'DROP TABLE tmpCustomer';
+	    EXECUTE tmpSQL;
+	
+	RETURN;
+	END
+	$_$;
+2026-06-09 16:10:46.069 +03 [35632] LOG:  statement: ALTER FUNCTION public.rewards_report(min_monthly_purchases integer, min_dollar_amount_purchased numeric) OWNER TO postgres;
+2026-06-09 16:10:46.070 +03 [35632] LOG:  statement: CREATE AGGREGATE public.group_concat(text) (
+	    SFUNC = public._group_concat,
+	    STYPE = text
+	);
+2026-06-09 16:10:46.071 +03 [35632] LOG:  statement: ALTER AGGREGATE public.group_concat(text) OWNER TO postgres;
+2026-06-09 16:10:46.072 +03 [35632] LOG:  statement: CREATE SEQUENCE public.actor_actor_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.073 +03 [35632] LOG:  statement: ALTER TABLE public.actor_actor_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.074 +03 [35632] LOG:  statement: CREATE TABLE public.actor (
+	    actor_id integer DEFAULT nextval('public.actor_actor_id_seq'::regclass) NOT NULL,
+	    first_name character varying(45) NOT NULL,
+	    last_name character varying(45) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.075 +03 [35632] LOG:  statement: ALTER TABLE public.actor OWNER TO postgres;
+2026-06-09 16:10:46.076 +03 [35632] LOG:  statement: CREATE SEQUENCE public.category_category_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.077 +03 [35632] LOG:  statement: ALTER TABLE public.category_category_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.077 +03 [35632] LOG:  statement: CREATE TABLE public.category (
+	    category_id integer DEFAULT nextval('public.category_category_id_seq'::regclass) NOT NULL,
+	    name character varying(25) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.079 +03 [35632] LOG:  statement: ALTER TABLE public.category OWNER TO postgres;
+2026-06-09 16:10:46.080 +03 [35632] LOG:  statement: CREATE SEQUENCE public.film_film_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.081 +03 [35632] LOG:  statement: ALTER TABLE public.film_film_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.081 +03 [35632] LOG:  statement: CREATE TABLE public.film (
+	    film_id integer DEFAULT nextval('public.film_film_id_seq'::regclass) NOT NULL,
+	    title character varying(255) NOT NULL,
+	    description text,
+	    release_year public.year,
+	    language_id smallint NOT NULL,
+	    rental_duration smallint DEFAULT 3 NOT NULL,
+	    rental_rate numeric(4,2) DEFAULT 4.99 NOT NULL,
+	    length smallint,
+	    replacement_cost numeric(5,2) DEFAULT 19.99 NOT NULL,
+	    rating public.mpaa_rating DEFAULT 'G'::public.mpaa_rating,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL,
+	    special_features text[],
+	    fulltext tsvector NOT NULL
+	);
+2026-06-09 16:10:46.085 +03 [35632] LOG:  statement: ALTER TABLE public.film OWNER TO postgres;
+2026-06-09 16:10:46.086 +03 [35632] LOG:  statement: CREATE TABLE public.film_actor (
+	    actor_id smallint NOT NULL,
+	    film_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.087 +03 [35632] LOG:  statement: ALTER TABLE public.film_actor OWNER TO postgres;
+2026-06-09 16:10:46.087 +03 [35632] LOG:  statement: CREATE TABLE public.film_category (
+	    film_id smallint NOT NULL,
+	    category_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.089 +03 [35632] LOG:  statement: ALTER TABLE public.film_category OWNER TO postgres;
+2026-06-09 16:10:46.089 +03 [35632] LOG:  statement: CREATE VIEW public.actor_info AS
+	 SELECT a.actor_id,
+	    a.first_name,
+	    a.last_name,
+	    public.group_concat(DISTINCT (((c.name)::text || ': '::text) || ( SELECT public.group_concat((f.title)::text) AS group_concat
+	           FROM ((public.film f
+	             JOIN public.film_category fc_1 ON ((f.film_id = fc_1.film_id)))
+	             JOIN public.film_actor fa_1 ON ((f.film_id = fa_1.film_id)))
+	          WHERE ((fc_1.category_id = c.category_id) AND (fa_1.actor_id = a.actor_id))
+	          GROUP BY fa_1.actor_id))) AS film_info
+	   FROM (((public.actor a
+	     LEFT JOIN public.film_actor fa ON ((a.actor_id = fa.actor_id)))
+	     LEFT JOIN public.film_category fc ON ((fa.film_id = fc.film_id)))
+	     LEFT JOIN public.category c ON ((fc.category_id = c.category_id)))
+	  GROUP BY a.actor_id, a.first_name, a.last_name;
+2026-06-09 16:10:46.094 +03 [35632] LOG:  statement: ALTER TABLE public.actor_info OWNER TO postgres;
+2026-06-09 16:10:46.094 +03 [35632] LOG:  statement: CREATE SEQUENCE public.address_address_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.096 +03 [35632] LOG:  statement: ALTER TABLE public.address_address_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.096 +03 [35632] LOG:  statement: CREATE TABLE public.address (
+	    address_id integer DEFAULT nextval('public.address_address_id_seq'::regclass) NOT NULL,
+	    address character varying(50) NOT NULL,
+	    address2 character varying(50),
+	    district character varying(20) NOT NULL,
+	    city_id smallint NOT NULL,
+	    postal_code character varying(10),
+	    phone character varying(20) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.097 +03 [35632] LOG:  statement: ALTER TABLE public.address OWNER TO postgres;
+2026-06-09 16:10:46.098 +03 [35632] LOG:  statement: CREATE SEQUENCE public.city_city_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.099 +03 [35632] LOG:  statement: ALTER TABLE public.city_city_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.099 +03 [35632] LOG:  statement: CREATE TABLE public.city (
+	    city_id integer DEFAULT nextval('public.city_city_id_seq'::regclass) NOT NULL,
+	    city character varying(50) NOT NULL,
+	    country_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.101 +03 [35632] LOG:  statement: ALTER TABLE public.city OWNER TO postgres;
+2026-06-09 16:10:46.102 +03 [35632] LOG:  statement: CREATE SEQUENCE public.country_country_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.103 +03 [35632] LOG:  statement: ALTER TABLE public.country_country_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.103 +03 [35632] LOG:  statement: CREATE TABLE public.country (
+	    country_id integer DEFAULT nextval('public.country_country_id_seq'::regclass) NOT NULL,
+	    country character varying(50) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.105 +03 [35632] LOG:  statement: ALTER TABLE public.country OWNER TO postgres;
+2026-06-09 16:10:46.106 +03 [35632] LOG:  statement: CREATE VIEW public.customer_list AS
+	 SELECT cu.customer_id AS id,
+	    (((cu.first_name)::text || ' '::text) || (cu.last_name)::text) AS name,
+	    a.address,
+	    a.postal_code AS "zip code",
+	    a.phone,
+	    city.city,
+	    country.country,
+	        CASE
+	            WHEN cu.activebool THEN 'active'::text
+	            ELSE ''::text
+	        END AS notes,
+	    cu.store_id AS sid
+	   FROM (((public.customer cu
+	     JOIN public.address a ON ((cu.address_id = a.address_id)))
+	     JOIN public.city ON ((a.city_id = city.city_id)))
+	     JOIN public.country ON ((city.country_id = country.country_id)));
+2026-06-09 16:10:46.107 +03 [35632] LOG:  statement: ALTER TABLE public.customer_list OWNER TO postgres;
+2026-06-09 16:10:46.108 +03 [35632] LOG:  statement: CREATE VIEW public.film_list AS
+	 SELECT film.film_id AS fid,
+	    film.title,
+	    film.description,
+	    category.name AS category,
+	    film.rental_rate AS price,
+	    film.length,
+	    film.rating,
+	    public.group_concat((((actor.first_name)::text || ' '::text) || (actor.last_name)::text)) AS actors
+	   FROM ((((public.category
+	     LEFT JOIN public.film_category ON ((category.category_id = film_category.category_id)))
+	     LEFT JOIN public.film ON ((film_category.film_id = film.film_id)))
+	     JOIN public.film_actor ON ((film.film_id = film_actor.film_id)))
+	     JOIN public.actor ON ((film_actor.actor_id = actor.actor_id)))
+	  GROUP BY film.film_id, film.title, film.description, category.name, film.rental_rate, film.length, film.rating;
+2026-06-09 16:10:46.109 +03 [35632] LOG:  statement: ALTER TABLE public.film_list OWNER TO postgres;
+2026-06-09 16:10:46.110 +03 [35632] LOG:  statement: CREATE SEQUENCE public.inventory_inventory_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.111 +03 [35632] LOG:  statement: ALTER TABLE public.inventory_inventory_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.111 +03 [35632] LOG:  statement: CREATE TABLE public.inventory (
+	    inventory_id integer DEFAULT nextval('public.inventory_inventory_id_seq'::regclass) NOT NULL,
+	    film_id smallint NOT NULL,
+	    store_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.114 +03 [35632] LOG:  statement: ALTER TABLE public.inventory OWNER TO postgres;
+2026-06-09 16:10:46.114 +03 [35632] LOG:  statement: CREATE SEQUENCE public.language_language_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.115 +03 [35632] LOG:  statement: ALTER TABLE public.language_language_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.116 +03 [35632] LOG:  statement: CREATE TABLE public.language (
+	    language_id integer DEFAULT nextval('public.language_language_id_seq'::regclass) NOT NULL,
+	    name character(20) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.117 +03 [35632] LOG:  statement: ALTER TABLE public.language OWNER TO postgres;
+2026-06-09 16:10:46.118 +03 [35632] LOG:  statement: CREATE VIEW public.nicer_but_slower_film_list AS
+	 SELECT film.film_id AS fid,
+	    film.title,
+	    film.description,
+	    category.name AS category,
+	    film.rental_rate AS price,
+	    film.length,
+	    film.rating,
+	    public.group_concat((((upper("substring"((actor.first_name)::text, 1, 1)) || lower("substring"((actor.first_name)::text, 2))) || upper("substring"((actor.last_name)::text, 1, 1))) || lower("substring"((actor.last_name)::text, 2)))) AS actors
+	   FROM ((((public.category
+	     LEFT JOIN public.film_category ON ((category.category_id = film_category.category_id)))
+	     LEFT JOIN public.film ON ((film_category.film_id = film.film_id)))
+	     JOIN public.film_actor ON ((film.film_id = film_actor.film_id)))
+	     JOIN public.actor ON ((film_actor.actor_id = actor.actor_id)))
+	  GROUP BY film.film_id, film.title, film.description, category.name, film.rental_rate, film.length, film.rating;
+2026-06-09 16:10:46.119 +03 [35632] LOG:  statement: ALTER TABLE public.nicer_but_slower_film_list OWNER TO postgres;
+2026-06-09 16:10:46.120 +03 [35632] LOG:  statement: CREATE SEQUENCE public.payment_payment_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.121 +03 [35632] LOG:  statement: ALTER TABLE public.payment_payment_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.122 +03 [35632] LOG:  statement: CREATE TABLE public.payment (
+	    payment_id integer DEFAULT nextval('public.payment_payment_id_seq'::regclass) NOT NULL,
+	    customer_id smallint NOT NULL,
+	    staff_id smallint NOT NULL,
+	    rental_id integer NOT NULL,
+	    amount numeric(5,2) NOT NULL,
+	    payment_date timestamp without time zone NOT NULL
+	);
+2026-06-09 16:10:46.123 +03 [35632] LOG:  statement: ALTER TABLE public.payment OWNER TO postgres;
+2026-06-09 16:10:46.123 +03 [35632] LOG:  statement: CREATE SEQUENCE public.rental_rental_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.124 +03 [35632] LOG:  statement: ALTER TABLE public.rental_rental_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.124 +03 [35632] LOG:  statement: CREATE TABLE public.rental (
+	    rental_id integer DEFAULT nextval('public.rental_rental_id_seq'::regclass) NOT NULL,
+	    rental_date timestamp without time zone NOT NULL,
+	    inventory_id integer NOT NULL,
+	    customer_id smallint NOT NULL,
+	    return_date timestamp without time zone,
+	    staff_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.126 +03 [35632] LOG:  statement: ALTER TABLE public.rental OWNER TO postgres;
+2026-06-09 16:10:46.126 +03 [35632] LOG:  statement: CREATE VIEW public.sales_by_film_category AS
+	 SELECT c.name AS category,
+	    sum(p.amount) AS total_sales
+	   FROM (((((public.payment p
+	     JOIN public.rental r ON ((p.rental_id = r.rental_id)))
+	     JOIN public.inventory i ON ((r.inventory_id = i.inventory_id)))
+	     JOIN public.film f ON ((i.film_id = f.film_id)))
+	     JOIN public.film_category fc ON ((f.film_id = fc.film_id)))
+	     JOIN public.category c ON ((fc.category_id = c.category_id)))
+	  GROUP BY c.name
+	  ORDER BY (sum(p.amount)) DESC;
+2026-06-09 16:10:46.128 +03 [35632] LOG:  statement: ALTER TABLE public.sales_by_film_category OWNER TO postgres;
+2026-06-09 16:10:46.128 +03 [35632] LOG:  statement: CREATE SEQUENCE public.staff_staff_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.130 +03 [35632] LOG:  statement: ALTER TABLE public.staff_staff_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.131 +03 [35632] LOG:  statement: CREATE TABLE public.staff (
+	    staff_id integer DEFAULT nextval('public.staff_staff_id_seq'::regclass) NOT NULL,
+	    first_name character varying(45) NOT NULL,
+	    last_name character varying(45) NOT NULL,
+	    address_id smallint NOT NULL,
+	    email character varying(50),
+	    store_id smallint NOT NULL,
+	    active boolean DEFAULT true NOT NULL,
+	    username character varying(16) NOT NULL,
+	    password character varying(40),
+	    last_update timestamp without time zone DEFAULT now() NOT NULL,
+	    picture bytea
+	);
+2026-06-09 16:10:46.135 +03 [35632] LOG:  statement: ALTER TABLE public.staff OWNER TO postgres;
+2026-06-09 16:10:46.135 +03 [35632] LOG:  statement: CREATE SEQUENCE public.store_store_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+2026-06-09 16:10:46.136 +03 [35632] LOG:  statement: ALTER TABLE public.store_store_id_seq OWNER TO postgres;
+2026-06-09 16:10:46.137 +03 [35632] LOG:  statement: CREATE TABLE public.store (
+	    store_id integer DEFAULT nextval('public.store_store_id_seq'::regclass) NOT NULL,
+	    manager_staff_id smallint NOT NULL,
+	    address_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+2026-06-09 16:10:46.139 +03 [35632] LOG:  statement: ALTER TABLE public.store OWNER TO postgres;
+2026-06-09 16:10:46.140 +03 [35632] LOG:  statement: CREATE VIEW public.sales_by_store AS
+	 SELECT (((c.city)::text || ','::text) || (cy.country)::text) AS store,
+	    (((m.first_name)::text || ' '::text) || (m.last_name)::text) AS manager,
+	    sum(p.amount) AS total_sales
+	   FROM (((((((public.payment p
+	     JOIN public.rental r ON ((p.rental_id = r.rental_id)))
+	     JOIN public.inventory i ON ((r.inventory_id = i.inventory_id)))
+	     JOIN public.store s ON ((i.store_id = s.store_id)))
+	     JOIN public.address a ON ((s.address_id = a.address_id)))
+	     JOIN public.city c ON ((a.city_id = c.city_id)))
+	     JOIN public.country cy ON ((c.country_id = cy.country_id)))
+	     JOIN public.staff m ON ((s.manager_staff_id = m.staff_id)))
+	  GROUP BY cy.country, c.city, s.store_id, m.first_name, m.last_name
+	  ORDER BY cy.country, c.city;
+2026-06-09 16:10:46.142 +03 [35632] LOG:  statement: ALTER TABLE public.sales_by_store OWNER TO postgres;
+2026-06-09 16:10:46.143 +03 [35632] LOG:  statement: CREATE VIEW public.staff_list AS
+	 SELECT s.staff_id AS id,
+	    (((s.first_name)::text || ' '::text) || (s.last_name)::text) AS name,
+	    a.address,
+	    a.postal_code AS "zip code",
+	    a.phone,
+	    city.city,
+	    country.country,
+	    s.store_id AS sid
+	   FROM (((public.staff s
+	     JOIN public.address a ON ((s.address_id = a.address_id)))
+	     JOIN public.city ON ((a.city_id = city.city_id)))
+	     JOIN public.country ON ((city.country_id = country.country_id)));
+2026-06-09 16:10:46.144 +03 [35632] LOG:  statement: ALTER TABLE public.staff_list OWNER TO postgres;
+2026-06-09 16:10:46.439 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.actor
+	    ADD CONSTRAINT actor_pkey PRIMARY KEY (actor_id);
+2026-06-09 16:10:46.442 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.address
+	    ADD CONSTRAINT address_pkey PRIMARY KEY (address_id);
+2026-06-09 16:10:46.444 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.category
+	    ADD CONSTRAINT category_pkey PRIMARY KEY (category_id);
+2026-06-09 16:10:46.446 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.city
+	    ADD CONSTRAINT city_pkey PRIMARY KEY (city_id);
+2026-06-09 16:10:46.449 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.country
+	    ADD CONSTRAINT country_pkey PRIMARY KEY (country_id);
+2026-06-09 16:10:46.451 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.customer
+	    ADD CONSTRAINT customer_pkey PRIMARY KEY (customer_id);
+2026-06-09 16:10:46.454 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.film_actor
+	    ADD CONSTRAINT film_actor_pkey PRIMARY KEY (actor_id, film_id);
+2026-06-09 16:10:46.458 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.film_category
+	    ADD CONSTRAINT film_category_pkey PRIMARY KEY (film_id, category_id);
+2026-06-09 16:10:46.461 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.film
+	    ADD CONSTRAINT film_pkey PRIMARY KEY (film_id);
+2026-06-09 16:10:46.464 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.inventory
+	    ADD CONSTRAINT inventory_pkey PRIMARY KEY (inventory_id);
+2026-06-09 16:10:46.467 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.language
+	    ADD CONSTRAINT language_pkey PRIMARY KEY (language_id);
+2026-06-09 16:10:46.470 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.payment
+	    ADD CONSTRAINT payment_pkey PRIMARY KEY (payment_id);
+2026-06-09 16:10:46.476 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.rental
+	    ADD CONSTRAINT rental_pkey PRIMARY KEY (rental_id);
+2026-06-09 16:10:46.525 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.staff
+	    ADD CONSTRAINT staff_pkey PRIMARY KEY (staff_id);
+2026-06-09 16:10:46.528 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.store
+	    ADD CONSTRAINT store_pkey PRIMARY KEY (store_id);
+2026-06-09 16:10:46.530 +03 [35632] LOG:  statement: CREATE INDEX film_fulltext_idx ON public.film USING gist (fulltext);
+2026-06-09 16:10:46.540 +03 [35632] LOG:  statement: CREATE INDEX idx_actor_last_name ON public.actor USING btree (last_name);
+2026-06-09 16:10:46.542 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_address_id ON public.customer USING btree (address_id);
+2026-06-09 16:10:46.544 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_city_id ON public.address USING btree (city_id);
+2026-06-09 16:10:46.547 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_country_id ON public.city USING btree (country_id);
+2026-06-09 16:10:46.549 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_customer_id ON public.payment USING btree (customer_id);
+2026-06-09 16:10:46.555 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_film_id ON public.film_actor USING btree (film_id);
+2026-06-09 16:10:46.559 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_inventory_id ON public.rental USING btree (inventory_id);
+2026-06-09 16:10:46.567 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_language_id ON public.film USING btree (language_id);
+2026-06-09 16:10:46.569 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_rental_id ON public.payment USING btree (rental_id);
+2026-06-09 16:10:46.576 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_staff_id ON public.payment USING btree (staff_id);
+2026-06-09 16:10:46.582 +03 [35632] LOG:  statement: CREATE INDEX idx_fk_store_id ON public.customer USING btree (store_id);
+2026-06-09 16:10:46.584 +03 [35632] LOG:  statement: CREATE INDEX idx_last_name ON public.customer USING btree (last_name);
+2026-06-09 16:10:46.586 +03 [35632] LOG:  statement: CREATE INDEX idx_store_id_film_id ON public.inventory USING btree (store_id, film_id);
+2026-06-09 16:10:46.591 +03 [35632] LOG:  statement: CREATE INDEX idx_title ON public.film USING btree (title);
+2026-06-09 16:10:46.594 +03 [35632] LOG:  statement: CREATE UNIQUE INDEX idx_unq_manager_staff_id ON public.store USING btree (manager_staff_id);
+2026-06-09 16:10:46.595 +03 [35632] LOG:  statement: CREATE UNIQUE INDEX idx_unq_rental_rental_date_inventory_id_customer_id ON public.rental USING btree (rental_date, inventory_id, customer_id);
+2026-06-09 16:10:46.603 +03 [35632] LOG:  statement: CREATE TRIGGER film_fulltext_trigger BEFORE INSERT OR UPDATE ON public.film FOR EACH ROW EXECUTE PROCEDURE tsvector_update_trigger('fulltext', 'pg_catalog.english', 'title', 'description');
+2026-06-09 16:10:46.606 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.actor FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.607 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.address FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.607 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.category FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.607 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.city FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.608 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.country FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.608 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.customer FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.608 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.film FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.609 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.film_actor FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.609 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.film_category FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.609 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.inventory FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.609 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.language FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.610 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.rental FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.610 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.staff FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.610 +03 [35632] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.store FOR EACH ROW EXECUTE PROCEDURE public.last_updated();
+2026-06-09 16:10:46.611 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.customer
+	    ADD CONSTRAINT customer_address_id_fkey FOREIGN KEY (address_id) REFERENCES public.address(address_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.616 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.film_actor
+	    ADD CONSTRAINT film_actor_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(actor_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.620 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.film_actor
+	    ADD CONSTRAINT film_actor_film_id_fkey FOREIGN KEY (film_id) REFERENCES public.film(film_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.624 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.film_category
+	    ADD CONSTRAINT film_category_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.category(category_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.627 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.film_category
+	    ADD CONSTRAINT film_category_film_id_fkey FOREIGN KEY (film_id) REFERENCES public.film(film_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.631 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.film
+	    ADD CONSTRAINT film_language_id_fkey FOREIGN KEY (language_id) REFERENCES public.language(language_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.634 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.address
+	    ADD CONSTRAINT fk_address_city FOREIGN KEY (city_id) REFERENCES public.city(city_id);
+2026-06-09 16:10:46.637 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.city
+	    ADD CONSTRAINT fk_city FOREIGN KEY (country_id) REFERENCES public.country(country_id);
+2026-06-09 16:10:46.640 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.inventory
+	    ADD CONSTRAINT inventory_film_id_fkey FOREIGN KEY (film_id) REFERENCES public.film(film_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.644 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.payment
+	    ADD CONSTRAINT payment_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customer(customer_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.649 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.payment
+	    ADD CONSTRAINT payment_rental_id_fkey FOREIGN KEY (rental_id) REFERENCES public.rental(rental_id) ON UPDATE CASCADE ON DELETE SET NULL;
+2026-06-09 16:10:46.657 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.payment
+	    ADD CONSTRAINT payment_staff_id_fkey FOREIGN KEY (staff_id) REFERENCES public.staff(staff_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.660 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.rental
+	    ADD CONSTRAINT rental_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customer(customer_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.665 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.rental
+	    ADD CONSTRAINT rental_inventory_id_fkey FOREIGN KEY (inventory_id) REFERENCES public.inventory(inventory_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.669 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.rental
+	    ADD CONSTRAINT rental_staff_id_key FOREIGN KEY (staff_id) REFERENCES public.staff(staff_id);
+2026-06-09 16:10:46.673 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.staff
+	    ADD CONSTRAINT staff_address_id_fkey FOREIGN KEY (address_id) REFERENCES public.address(address_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.675 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.store
+	    ADD CONSTRAINT store_address_id_fkey FOREIGN KEY (address_id) REFERENCES public.address(address_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:10:46.678 +03 [35632] LOG:  statement: ALTER TABLE ONLY public.store
+	    ADD CONSTRAINT store_manager_staff_id_fkey FOREIGN KEY (manager_staff_id) REFERENCES public.staff(staff_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+2026-06-09 16:13:29.827 +03 [33548] ERROR:  syntax error at or near "BEGIN" at character 5
+2026-06-09 16:13:29.827 +03 [33548] STATEMENT:  DO  BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'replicator') THEN CREATE ROLE replicator WITH REPLICATION LOGIN; END IF; END ;
+2026-06-09 16:13:40.679 +03 [31364] LOG:  statement: CREATE ROLE replicator WITH REPLICATION LOGIN;
+2026-06-09 16:13:52.403 +03 [18316] LOG:  checkpoint starting: force wait
+2026-06-09 16:16:22.721 +03 [18316] LOG:  checkpoint complete: wrote 1539 buffers (9.4%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 2 recycled; write=149.543 s, sync=0.701 s, total=150.319 s; sync files=397, longest=0.004 s, average=0.002 s; distance=24635 kB, estimate=24635 kB; lsn=0/4000060, redo lsn=0/3000028
+2026-06-09 16:16:22.733 +03 [18316] LOG:  checkpoint starting: immediate force wait
+2026-06-09 16:16:22.796 +03 [18316] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=0.001 s, sync=0.001 s, total=0.063 s; sync files=0, longest=0.000 s, average=0.000 s; distance=16384 kB, estimate=23810 kB; lsn=0/4000130, redo lsn=0/40000D8
+2026-06-09 16:16:22.984 +03 [19284] LOG:  could not send data to client: unrecognized winsock error 10054
+2026-06-09 16:16:22.984 +03 [19284] STATEMENT:  BASE_BACKUP ( LABEL 'pg_basebackup base backup',  PROGRESS,  WAIT 0,  TABLESPACE_MAP,  MANIFEST 'yes',  TARGET 'client')
+2026-06-09 16:16:22.985 +03 [19284] FATAL:  connection to client lost
+2026-06-09 16:16:22.985 +03 [19284] STATEMENT:  BASE_BACKUP ( LABEL 'pg_basebackup base backup',  PROGRESS,  WAIT 0,  TABLESPACE_MAP,  MANIFEST 'yes',  TARGET 'client')
+2026-06-09 16:16:22.985 +03 [19284] WARNING:  aborting backup due to backend exiting before pg_backup_stop was called
+2026-06-09 16:16:36.669 +03 [18128] LOG:  statement: CREATE TABLE IF NOT EXISTS pitr_demo_log(id bigserial PRIMARY KEY, note text, created_at timestamptz DEFAULT now()); INSERT INTO pitr_demo_log(note) VALUES ('WAL archive test before PITR'); SELECT now() AS marker_time, pg_switch_wal() AS switched_wal;
+2026-06-09 16:21:22.803 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 16:21:27.747 +03 [18316] LOG:  checkpoint complete: wrote 44 buffers (0.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 2 recycled; write=4.811 s, sync=0.095 s, total=4.944 s; sync files=36, longest=0.012 s, average=0.003 s; distance=32769 kB, estimate=32769 kB; lsn=0/60008D8, redo lsn=0/6000848
+2026-06-09 17:16:22.843 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 17:16:22.972 +03 [18316] LOG:  checkpoint complete: wrote 1 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.112 s, sync=0.003 s, total=0.130 s; sync files=1, longest=0.003 s, average=0.003 s; distance=8 kB, estimate=29493 kB; lsn=0/6002A78, redo lsn=0/6002A20
+2026-06-09 17:21:22.973 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 17:21:24.215 +03 [18316] LOG:  checkpoint complete: wrote 11 buffers (0.1%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=1.202 s, sync=0.023 s, total=1.242 s; sync files=11, longest=0.003 s, average=0.003 s; distance=46 kB, estimate=26548 kB; lsn=0/600E358, redo lsn=0/600E300
+2026-06-09 17:44:09.989 +03 [18316] LOG:  checkpoint starting: immediate force wait
+2026-06-09 17:44:10.006 +03 [18316] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.018 s; sync files=0, longest=0.000 s, average=0.000 s; distance=16327 kB, estimate=25526 kB; lsn=0/7000080, redo lsn=0/7000028
+2026-06-09 17:49:09.007 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 17:49:09.034 +03 [18316] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 2 recycled; write=0.001 s, sync=0.001 s, total=0.028 s; sync files=0, longest=0.000 s, average=0.000 s; distance=16384 kB, estimate=24612 kB; lsn=0/80000B8, redo lsn=0/8000060
+2026-06-09 17:57:25.618 +03 [36304] LOG:  statement: CREATE TABLE IF NOT EXISTS pitr_demo_log(id bigserial PRIMARY KEY, note text, created_at timestamptz DEFAULT now());
+2026-06-09 17:59:09.052 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 17:59:09.423 +03 [18316] LOG:  checkpoint complete: wrote 3 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=0.323 s, sync=0.018 s, total=0.371 s; sync files=4, longest=0.012 s, average=0.005 s; distance=16384 kB, estimate=23789 kB; lsn=0/90000B8, redo lsn=0/9000060
+2026-06-09 18:04:35.746 +03 [8576] LOG:  statement: CREATE TABLE IF NOT EXISTS pitr_demo_log(id bigserial PRIMARY KEY, note text, created_at timestamptz DEFAULT now());
+2026-06-09 18:04:41.008 +03 [18316] LOG:  checkpoint starting: immediate force wait
+2026-06-09 18:04:41.024 +03 [18316] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.016 s; sync files=0, longest=0.000 s, average=0.000 s; distance=16383 kB, estimate=23049 kB; lsn=0/A000080, redo lsn=0/A000028
+2026-06-09 18:09:11.009 +03 [18316] LOG:  checkpoint starting: immediate force wait
+2026-06-09 18:09:11.164 +03 [18316] LOG:  checkpoint complete: wrote 96 buffers (0.6%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 4 recycled; write=0.035 s, sync=0.032 s, total=0.156 s; sync files=15, longest=0.003 s, average=0.003 s; distance=49152 kB, estimate=49152 kB; lsn=0/D000080, redo lsn=0/D000028
+2026-06-09 18:14:11.179 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 18:14:11.544 +03 [18316] LOG:  checkpoint complete: wrote 3 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=0.331 s, sync=0.014 s, total=0.365 s; sync files=2, longest=0.012 s, average=0.007 s; distance=16401 kB, estimate=45876 kB; lsn=0/E0047F0, redo lsn=0/E004798
+2026-06-09 18:36:52.962 +03 [16960] LOG:  statement: DROP DATABASE IF EXISTS etl_project5;
+2026-06-09 18:36:53.083 +03 [28424] LOG:  statement: CREATE DATABASE etl_project5;
+2026-06-09 18:36:53.478 +03 [38420] LOG:  statement: DROP TABLE IF EXISTS quality_log CASCADE;
+2026-06-09 18:36:53.482 +03 [38420] LOG:  statement: DROP TABLE IF EXISTS rejected_records CASCADE;
+2026-06-09 18:36:53.485 +03 [38420] LOG:  statement: DROP TABLE IF EXISTS final_customers CASCADE;
+2026-06-09 18:36:53.488 +03 [38420] LOG:  statement: DROP TABLE IF EXISTS clean_customer_candidates CASCADE;
+2026-06-09 18:36:53.492 +03 [38420] LOG:  statement: DROP TABLE IF EXISTS dim_city_lookup CASCADE;
+2026-06-09 18:36:53.495 +03 [38420] LOG:  statement: DROP TABLE IF EXISTS staging_customers CASCADE;
+2026-06-09 18:36:53.498 +03 [38420] LOG:  statement: CREATE TABLE staging_customers (
+	    staging_id       bigserial PRIMARY KEY,
+	    source_file      text DEFAULT 'dirty_customers.csv',
+	    first_name_raw   text,
+	    last_name_raw    text,
+	    email_raw        text,
+	    phone_raw        text,
+	    age_raw          text,
+	    city_raw         text,
+	    country_raw      text,
+	    order_date_raw   text,
+	    product_id_raw   text,
+	    quantity_raw     text,
+	    unit_price_raw   text,
+	    loaded_at        timestamptz DEFAULT now()
+	);
+2026-06-09 18:36:53.508 +03 [38420] LOG:  statement: CREATE TABLE dim_city_lookup (
+	    city_alias   text PRIMARY KEY,
+	    city_name    text NOT NULL,
+	    country_code char(2) NOT NULL
+	);
+2026-06-09 18:36:53.514 +03 [38420] LOG:  statement: CREATE TABLE final_customers (
+	    customer_id       bigserial PRIMARY KEY,
+	    source_staging_id bigint NOT NULL UNIQUE,
+	    full_name         text NOT NULL,
+	    email             text NOT NULL,
+	    phone             text NOT NULL,
+	    age               integer NOT NULL CHECK (age BETWEEN 0 AND 120),
+	    age_group         text NOT NULL,
+	    customer_segment  text NOT NULL,
+	    city              text NOT NULL,
+	    country_code      char(2) NOT NULL,
+	    order_date        date NOT NULL,
+	    product_id        integer NOT NULL,
+	    quantity          integer NOT NULL CHECK (quantity > 0),
+	    unit_price        numeric(12,2) NOT NULL CHECK (unit_price >= 0),
+	    total_amount      numeric(12,2)
+	        GENERATED ALWAYS AS (quantity * unit_price) STORED,
+	    loaded_at         timestamptz DEFAULT now(),
+	    UNIQUE (email, phone),
+	    CHECK (email ~* '^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$'),
+	    CHECK (phone ~ '^\+90[0-9]{10}$')
+	);
+2026-06-09 18:36:53.521 +03 [38420] LOG:  statement: CREATE TABLE rejected_records (
+	    rejected_id   bigserial PRIMARY KEY,
+	    staging_id    bigint NOT NULL,
+	    reject_reason text NOT NULL,
+	    raw_record    jsonb NOT NULL,
+	    rejected_at   timestamptz DEFAULT now()
+	);
+2026-06-09 18:36:53.525 +03 [38420] LOG:  statement: CREATE TABLE quality_log (
+	    log_id       bigserial PRIMARY KEY,
+	    run_name     text NOT NULL,
+	    stage        text NOT NULL,
+	    metric_name  text NOT NULL,
+	    metric_value numeric(18,4) NOT NULL,
+	    metric_unit  text DEFAULT 'count',
+	    details      jsonb,
+	    measured_at  timestamptz DEFAULT now()
+	);
+2026-06-09 18:39:11.596 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 18:41:15.502 +03 [18316] LOG:  checkpoint complete: wrote 1129 buffers (6.9%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=123.341 s, sync=0.549 s, total=123.906 s; sync files=330, longest=0.006 s, average=0.002 s; distance=5896 kB, estimate=41878 kB; lsn=0/E5CBCB0, redo lsn=0/E5C6B58
+2026-06-09 18:43:22.257 +03 [11124] LOG:  statement: DROP TABLE IF EXISTS clean_customer_candidates;
+2026-06-09 18:43:22.261 +03 [11124] LOG:  statement: CREATE TABLE clean_customer_candidates AS
+	WITH text_clean AS (
+	    SELECT
+	        staging_id,
+	        NULLIF(initcap(lower(trim(first_name_raw))), '') AS first_name_clean,
+	        NULLIF(initcap(lower(trim(last_name_raw))), '') AS last_name_clean,
+	        lower(trim(coalesce(email_raw, ''))) AS email_clean,
+	        regexp_replace(coalesce(phone_raw, ''), '\D', '', 'g') AS phone_digits,
+	        initcap(lower(coalesce(nullif(trim(city_raw), ''), 'Bilinmiyor'))) AS city_clean,
+	        trim(coalesce(country_raw, 'TR')) AS country_clean,
+	        trim(coalesce(order_date_raw, '')) AS date_raw,
+	        trim(coalesce(age_raw, '')) AS age_text,
+	        trim(coalesce(product_id_raw, '')) AS product_text,
+	        trim(coalesce(quantity_raw, '')) AS quantity_text,
+	        trim(coalesce(unit_price_raw, '')) AS price_text
+	    FROM staging_customers
+	),
+	typed AS (
+	    SELECT
+	        staging_id,
+	        first_name_clean,
+	        last_name_clean,
+	        CASE
+	            WHEN email_clean ~* '^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$'
+	            THEN email_clean
+	        END AS email,
+	        CASE
+	            WHEN phone_digits ~ '^90[0-9]{10}$' THEN '+' || phone_digits
+	            WHEN phone_digits ~ '^0[0-9]{10}$' THEN '+90' || substring(phone_digits FROM 2)
+	            WHEN phone_digits ~ '^[0-9]{10}$' THEN '+90' || phone_digits
+	        END AS phone,
+	        CASE
+	            WHEN age_text ~ '^\d+$' AND age_text::integer BETWEEN 0 AND 120
+	            THEN age_text::integer
+	        END AS age,
+	        CASE
+	            WHEN date_raw ~ '^\d{4}-\d{2}-\d{2}$' THEN to_date(date_raw, 'YYYY-MM-DD')
+	            WHEN date_raw ~ '^\d{2}/\d{2}/\d{4}$' THEN to_date(date_raw, 'DD/MM/YYYY')
+	            WHEN date_raw ~ '^\d{2}\.\d{2}\.\d{4}$' THEN to_date(date_raw, 'DD.MM.YYYY')
+	        END AS order_date,
+	        CASE
+	            WHEN product_text ~ '^\d+$' THEN product_text::integer
+	        END AS product_id,
+	        CASE
+	            WHEN quantity_text ~ '^\d+$' AND quantity_text::integer > 0
+	            THEN quantity_text::integer
+	        END AS quantity,
+	        CASE
+	            WHEN price_text ~ '^\d+(\.\d+)?$' AND price_text::numeric >= 0
+	            THEN price_text::numeric(12,2)
+	        END AS unit_price,
+	        lower(city_clean) AS city_alias
+	    FROM text_clean
+	),
+	business_ready AS (
+	    SELECT
+	        t.staging_id AS source_staging_id,
+	        t.first_name_clean,
+	        t.last_name_clean,
+	        concat_ws(' ', t.first_name_clean, t.last_name_clean) AS full_name,
+	        t.email,
+	        t.phone,
+	        t.age,
+	        CASE
+	            WHEN t.age < 25 THEN '18-24'
+	            WHEN t.age < 35 THEN '25-34'
+	            WHEN t.age < 50 THEN '35-49'
+	            WHEN t.age IS NOT NULL THEN '50+'
+	        END AS age_group,
+	        CASE
+	            WHEN t.quantity * t.unit_price >= 1000 THEN 'Premium'
+	            WHEN t.quantity * t.unit_price >= 250 THEN 'Standart'
+	            WHEN t.quantity IS NOT NULL AND t.unit_price IS NOT NULL THEN 'Yeni'
+	        END AS customer_segment,
+	        coalesce(l.city_name, 'Bilinmiyor') AS city,
+	        coalesce(l.country_code, 'TR') AS country_code,
+	        t.order_date,
+	        t.product_id,
+	        t.quantity,
+	        t.unit_price,
+	        ROW_NUMBER() OVER (
+	            PARTITION BY t.email, t.phone
+	            ORDER BY t.order_date DESC NULLS LAST, t.staging_id DESC
+	        ) AS rn
+	    FROM typed t
+	    LEFT JOIN dim_city_lookup l
+	      ON lower(t.city_alias) = l.city_alias
+	)
+	SELECT *
+	FROM business_ready;
+2026-06-09 18:44:11.538 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 18:44:52.493 +03 [18316] LOG:  checkpoint complete: wrote 373 buffers (2.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=40.823 s, sync=0.106 s, total=40.956 s; sync files=50, longest=0.013 s, average=0.003 s; distance=3608 kB, estimate=38051 kB; lsn=0/E94CDF0, redo lsn=0/E94CD60
+2026-06-09 18:44:57.660 +03 [18172] LOG:  statement: DROP TABLE IF EXISTS clean_customer_candidates;
+2026-06-09 18:44:57.667 +03 [18172] LOG:  statement: CREATE TABLE clean_customer_candidates AS
+	WITH text_clean AS (
+	    SELECT
+	        staging_id,
+	        NULLIF(initcap(lower(trim(first_name_raw))), '') AS first_name_clean,
+	        NULLIF(initcap(lower(trim(last_name_raw))), '') AS last_name_clean,
+	        lower(trim(coalesce(email_raw, ''))) AS email_clean,
+	        regexp_replace(coalesce(phone_raw, ''), '\D', '', 'g') AS phone_digits,
+	        initcap(lower(coalesce(nullif(trim(city_raw), ''), 'Bilinmiyor'))) AS city_clean,
+	        trim(coalesce(country_raw, 'TR')) AS country_clean,
+	        trim(coalesce(order_date_raw, '')) AS date_raw,
+	        trim(coalesce(age_raw, '')) AS age_text,
+	        trim(coalesce(product_id_raw, '')) AS product_text,
+	        trim(coalesce(quantity_raw, '')) AS quantity_text,
+	        trim(coalesce(unit_price_raw, '')) AS price_text
+	    FROM staging_customers
+	),
+	typed AS (
+	    SELECT
+	        staging_id,
+	        first_name_clean,
+	        last_name_clean,
+	        CASE
+	            WHEN email_clean ~* '^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$'
+	            THEN email_clean
+	        END AS email,
+	        CASE
+	            WHEN phone_digits ~ '^90[0-9]{10}$' THEN '+' || phone_digits
+	            WHEN phone_digits ~ '^0[0-9]{10}$' THEN '+90' || substring(phone_digits FROM 2)
+	            WHEN phone_digits ~ '^[0-9]{10}$' THEN '+90' || phone_digits
+	        END AS phone,
+	        CASE
+	            WHEN age_text ~ '^\d+$' AND age_text::integer BETWEEN 0 AND 120
+	            THEN age_text::integer
+	        END AS age,
+	        CASE
+	            WHEN date_raw ~ '^\d{4}-\d{2}-\d{2}$' THEN to_date(date_raw, 'YYYY-MM-DD')
+	            WHEN date_raw ~ '^\d{2}/\d{2}/\d{4}$' THEN to_date(date_raw, 'DD/MM/YYYY')
+	            WHEN date_raw ~ '^\d{2}\.\d{2}\.\d{4}$' THEN to_date(date_raw, 'DD.MM.YYYY')
+	        END AS order_date,
+	        CASE
+	            WHEN product_text ~ '^\d+$' THEN product_text::integer
+	        END AS product_id,
+	        CASE
+	            WHEN quantity_text ~ '^\d+$' AND quantity_text::integer > 0
+	            THEN quantity_text::integer
+	        END AS quantity,
+	        CASE
+	            WHEN price_text ~ '^\d+(\.\d+)?$' AND price_text::numeric >= 0
+	            THEN price_text::numeric(12,2)
+	        END AS unit_price,
+	        lower(city_clean) AS city_alias
+	    FROM text_clean
+	),
+	business_ready AS (
+	    SELECT
+	        t.staging_id AS source_staging_id,
+	        t.first_name_clean,
+	        t.last_name_clean,
+	        concat_ws(' ', t.first_name_clean, t.last_name_clean) AS full_name,
+	        t.email,
+	        t.phone,
+	        t.age,
+	        CASE
+	            WHEN t.age < 25 THEN '18-24'
+	            WHEN t.age < 35 THEN '25-34'
+	            WHEN t.age < 50 THEN '35-49'
+	            WHEN t.age IS NOT NULL THEN '50+'
+	        END AS age_group,
+	        CASE
+	            WHEN t.quantity * t.unit_price >= 1000 THEN 'Premium'
+	            WHEN t.quantity * t.unit_price >= 250 THEN 'Standart'
+	            WHEN t.quantity IS NOT NULL AND t.unit_price IS NOT NULL THEN 'Yeni'
+	        END AS customer_segment,
+	        coalesce(l.city_name, 'Bilinmiyor') AS city,
+	        coalesce(l.country_code, 'TR') AS country_code,
+	        t.order_date,
+	        t.product_id,
+	        t.quantity,
+	        t.unit_price,
+	        ROW_NUMBER() OVER (
+	            PARTITION BY t.email, t.phone
+	            ORDER BY t.order_date DESC NULLS LAST, t.staging_id DESC
+	        ) AS rn
+	    FROM typed t
+	    LEFT JOIN dim_city_lookup l
+	      ON lower(t.city_alias) = l.city_alias
+	)
+	SELECT *
+	FROM business_ready;
+2026-06-09 18:47:37.998 +03 [39752] ERROR:  column "customer_id" does not exist at character 8
+2026-06-09 18:47:37.998 +03 [39752] STATEMENT:  SELECT customer_id, full_name, email, phone, age, age_group, customer_segment, city, order_date, total_amount FROM rejected_records ORDER BY customer_id LIMIT 10;
+2026-06-09 18:47:52.088 +03 [38084] ERROR:  column "customer_id" does not exist at character 8
+2026-06-09 18:47:52.088 +03 [38084] STATEMENT:  SELECT customer_id, full_name, email, phone, age, age_group, customer_segment, city, order_date, total_amount FROM rejected_records ORDER BY customer_id LIMIT 10;
+2026-06-09 18:48:15.967 +03 [38364] ERROR:  column "customer_id" does not exist at character 41
+2026-06-09 18:48:15.967 +03 [38364] STATEMENT:  SELECT * FROM rejected_records ORDER BY customer_id LIMIT 10;
+2026-06-09 18:49:11.501 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 18:49:52.772 +03 [18316] LOG:  checkpoint complete: wrote 376 buffers (2.3%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=41.166 s, sync=0.087 s, total=41.271 s; sync files=46, longest=0.003 s, average=0.002 s; distance=3659 kB, estimate=34612 kB; lsn=0/ECDFD48, redo lsn=0/ECDFCB8
+2026-06-09 20:09:11.894 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 20:09:12.041 +03 [18316] LOG:  checkpoint complete: wrote 1 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.115 s, sync=0.003 s, total=0.148 s; sync files=1, longest=0.003 s, average=0.003 s; distance=0 kB, estimate=31151 kB; lsn=0/ECDFFC0, redo lsn=0/ECDFF68
+2026-06-09 20:15:42.447 +03 [34432] LOG:  statement: CREATE DATABASE verify_20260609_201542;
+2026-06-09 20:15:42.725 +03 [24756] LOG:  statement: CREATE TYPE public.mpaa_rating AS ENUM (
+	    'G',
+	    'PG',
+	    'PG-13',
+	    'R',
+	    'NC-17'
+	);
+	
+	
+	
+2026-06-09 20:15:42.729 +03 [24756] LOG:  statement: CREATE DOMAIN public.year AS integer
+		CONSTRAINT year_check CHECK (((VALUE >= 1901) AND (VALUE <= 2155)));
+	
+	
+	
+2026-06-09 20:15:42.730 +03 [24756] LOG:  statement: CREATE FUNCTION public._group_concat(text, text) RETURNS text
+	    LANGUAGE sql IMMUTABLE
+	    AS $_$
+	SELECT CASE
+	  WHEN $2 IS NULL THEN $1
+	  WHEN $1 IS NULL THEN $2
+	  ELSE $1 || ', ' || $2
+	END
+	$_$;
+	
+	
+	
+2026-06-09 20:15:42.731 +03 [24756] LOG:  statement: CREATE FUNCTION public.film_in_stock(p_film_id integer, p_store_id integer, OUT p_film_count integer) RETURNS SETOF integer
+	    LANGUAGE sql
+	    AS $_$
+	     SELECT inventory_id
+	     FROM inventory
+	     WHERE film_id = $1
+	     AND store_id = $2
+	     AND inventory_in_stock(inventory_id);
+	$_$;
+	
+	
+	
+2026-06-09 20:15:42.731 +03 [24756] LOG:  statement: CREATE FUNCTION public.film_not_in_stock(p_film_id integer, p_store_id integer, OUT p_film_count integer) RETURNS SETOF integer
+	    LANGUAGE sql
+	    AS $_$
+	    SELECT inventory_id
+	    FROM inventory
+	    WHERE film_id = $1
+	    AND store_id = $2
+	    AND NOT inventory_in_stock(inventory_id);
+	$_$;
+	
+	
+	
+2026-06-09 20:15:42.732 +03 [24756] LOG:  statement: CREATE FUNCTION public.get_customer_balance(p_customer_id integer, p_effective_date timestamp without time zone) RETURNS numeric
+	    LANGUAGE plpgsql
+	    AS $$
+	       --#OK, WE NEED TO CALCULATE THE CURRENT BALANCE GIVEN A CUSTOMER_ID AND A DATE
+	       --#THAT WE WANT THE BALANCE TO BE EFFECTIVE FOR. THE BALANCE IS:
+	       --#   1) RENTAL FEES FOR ALL PREVIOUS RENTALS
+	       --#   2) ONE DOLLAR FOR EVERY DAY THE PREVIOUS RENTALS ARE OVERDUE
+	       --#   3) IF A FILM IS MORE THAN RENTAL_DURATION * 2 OVERDUE, CHARGE THE REPLACEMENT_COST
+	       --#   4) SUBTRACT ALL PAYMENTS MADE BEFORE THE DATE SPECIFIED
+	DECLARE
+	    v_rentfees DECIMAL(5,2); --#FEES PAID TO RENT THE VIDEOS INITIALLY
+	    v_overfees INTEGER;      --#LATE FEES FOR PRIOR RENTALS
+	    v_payments DECIMAL(5,2); --#SUM OF PAYMENTS MADE PREVIOUSLY
+	BEGIN
+	    SELECT COALESCE(SUM(film.rental_rate),0) INTO v_rentfees
+	    FROM film, inventory, rental
+	    WHERE film.film_id = inventory.film_id
+	      AND inventory.inventory_id = rental.inventory_id
+	      AND rental.rental_date <= p_effective_date
+	      AND rental.customer_id = p_customer_id;
+	
+	    SELECT COALESCE(SUM(IF((rental.return_date - rental.rental_date) > (film.rental_duration * '1 day'::interval),
+	        ((rental.return_date - rental.rental_date) - (film.rental_duration * '1 day'::interval)),0)),0) INTO v_overfees
+	    FROM rental, inventory, film
+	    WHERE film.film_id = inventory.film_id
+	      AND inventory.inventory_id = rental.inventory_id
+	      AND rental.rental_date <= p_effective_date
+	      AND rental.customer_id = p_customer_id;
+	
+	    SELECT COALESCE(SUM(payment.amount),0) INTO v_payments
+	    FROM payment
+	    WHERE payment.payment_date <= p_effective_date
+	    AND payment.customer_id = p_customer_id;
+	
+	    RETURN v_rentfees + v_overfees - v_payments;
+	END
+	$$;
+	
+	
+	
+2026-06-09 20:15:42.755 +03 [24756] LOG:  statement: CREATE FUNCTION public.inventory_held_by_customer(p_inventory_id integer) RETURNS integer
+	    LANGUAGE plpgsql
+	    AS $$
+	DECLARE
+	    v_customer_id INTEGER;
+	BEGIN
+	
+	  SELECT customer_id INTO v_customer_id
+	  FROM rental
+	  WHERE return_date IS NULL
+	  AND inventory_id = p_inventory_id;
+	
+	  RETURN v_customer_id;
+	END $$;
+	
+	
+	
+2026-06-09 20:15:42.756 +03 [24756] LOG:  statement: CREATE FUNCTION public.inventory_in_stock(p_inventory_id integer) RETURNS boolean
+	    LANGUAGE plpgsql
+	    AS $$
+	DECLARE
+	    v_rentals INTEGER;
+	    v_out     INTEGER;
+	BEGIN
+	    -- AN ITEM IS IN-STOCK IF THERE ARE EITHER NO ROWS IN THE rental TABLE
+	    -- FOR THE ITEM OR ALL ROWS HAVE return_date POPULATED
+	
+	    SELECT count(*) INTO v_rentals
+	    FROM rental
+	    WHERE inventory_id = p_inventory_id;
+	
+	    IF v_rentals = 0 THEN
+	      RETURN TRUE;
+	    END IF;
+	
+	    SELECT COUNT(rental_id) INTO v_out
+	    FROM inventory LEFT JOIN rental USING(inventory_id)
+	    WHERE inventory.inventory_id = p_inventory_id
+	    AND rental.return_date IS NULL;
+	
+	    IF v_out > 0 THEN
+	      RETURN FALSE;
+	    ELSE
+	      RETURN TRUE;
+	    END IF;
+	END $$;
+	
+	
+	
+2026-06-09 20:15:42.756 +03 [24756] LOG:  statement: CREATE FUNCTION public.last_day(timestamp without time zone) RETURNS date
+	    LANGUAGE sql IMMUTABLE STRICT
+	    AS $_$
+	  SELECT CASE
+	    WHEN EXTRACT(MONTH FROM $1) = 12 THEN
+	      (((EXTRACT(YEAR FROM $1) + 1) operator(pg_catalog.||) '-01-01')::date - INTERVAL '1 day')::date
+	    ELSE
+	      ((EXTRACT(YEAR FROM $1) operator(pg_catalog.||) '-' operator(pg_catalog.||) (EXTRACT(MONTH FROM $1) + 1) operator(pg_catalog.||) '-01')::date - INTERVAL '1 day')::date
+	    END
+	$_$;
+	
+	
+	
+2026-06-09 20:15:42.756 +03 [24756] LOG:  statement: CREATE FUNCTION public.last_updated() RETURNS trigger
+	    LANGUAGE plpgsql
+	    AS $$
+	BEGIN
+	    NEW.last_update = CURRENT_TIMESTAMP;
+	    RETURN NEW;
+	END $$;
+	
+	
+	
+2026-06-09 20:15:42.756 +03 [24756] LOG:  statement: CREATE SEQUENCE public.customer_customer_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.759 +03 [24756] LOG:  statement: CREATE TABLE public.customer (
+	    customer_id integer DEFAULT nextval('public.customer_customer_id_seq'::regclass) NOT NULL,
+	    store_id smallint NOT NULL,
+	    first_name character varying(45) NOT NULL,
+	    last_name character varying(45) NOT NULL,
+	    email character varying(50),
+	    address_id smallint NOT NULL,
+	    activebool boolean DEFAULT true NOT NULL,
+	    create_date date DEFAULT ('now'::text)::date NOT NULL,
+	    last_update timestamp without time zone DEFAULT now(),
+	    active integer
+	);
+	
+	
+	
+2026-06-09 20:15:42.762 +03 [24756] LOG:  statement: CREATE FUNCTION public.rewards_report(min_monthly_purchases integer, min_dollar_amount_purchased numeric) RETURNS SETOF public.customer
+	    LANGUAGE plpgsql SECURITY DEFINER
+	    AS $_$
+	DECLARE
+	    last_month_start DATE;
+	    last_month_end DATE;
+	rr RECORD;
+	tmpSQL TEXT;
+	BEGIN
+	
+	    /* Some sanity checks... */
+	    IF min_monthly_purchases = 0 THEN
+	        RAISE EXCEPTION 'Minimum monthly purchases parameter must be > 0';
+	    END IF;
+	    IF min_dollar_amount_purchased = 0.00 THEN
+	        RAISE EXCEPTION 'Minimum monthly dollar amount purchased parameter must be > $0.00';
+	    END IF;
+	
+	    last_month_start := CURRENT_DATE - '3 month'::interval;
+	    last_month_start := to_date((extract(YEAR FROM last_month_start) || '-' || extract(MONTH FROM last_month_start) || '-01'),'YYYY-MM-DD');
+	    last_month_end := LAST_DAY(last_month_start);
+	
+	    /*
+	    Create a temporary storage area for Customer IDs.
+	    */
+	    CREATE TEMPORARY TABLE tmpCustomer (customer_id INTEGER NOT NULL PRIMARY KEY);
+	
+	    /*
+	    Find all customers meeting the monthly purchase requirements
+	    */
+	
+	    tmpSQL := 'INSERT INTO tmpCustomer (customer_id)
+	        SELECT p.customer_id
+	        FROM payment AS p
+	        WHERE DATE(p.payment_date) BETWEEN '||quote_literal(last_month_start) ||' AND '|| quote_literal(last_month_end) || '
+	        GROUP BY customer_id
+	        HAVING SUM(p.amount) > '|| min_dollar_amount_purchased || '
+	        AND COUNT(customer_id) > ' ||min_monthly_purchases ;
+	
+	    EXECUTE tmpSQL;
+	
+	    /*
+	    Output ALL customer information of matching rewardees.
+	    Customize output as needed.
+	    */
+	    FOR rr IN EXECUTE 'SELECT c.* FROM tmpCustomer AS t INNER JOIN customer AS c ON t.customer_id = c.customer_id' LOOP
+	        RETURN NEXT rr;
+	    END LOOP;
+	
+	    /* Clean up */
+	    tmpSQL := 'DROP TABLE tmpCustomer';
+	    EXECUTE tmpSQL;
+	
+	RETURN;
+	END
+	$_$;
+	
+	
+	
+2026-06-09 20:15:42.762 +03 [24756] LOG:  statement: CREATE AGGREGATE public.group_concat(text) (
+	    SFUNC = public._group_concat,
+	    STYPE = text
+	);
+	
+	
+	
+2026-06-09 20:15:42.763 +03 [24756] LOG:  statement: CREATE SEQUENCE public.actor_actor_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.764 +03 [24756] LOG:  statement: CREATE TABLE public.actor (
+	    actor_id integer DEFAULT nextval('public.actor_actor_id_seq'::regclass) NOT NULL,
+	    first_name character varying(45) NOT NULL,
+	    last_name character varying(45) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.765 +03 [24756] LOG:  statement: CREATE SEQUENCE public.category_category_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.766 +03 [24756] LOG:  statement: CREATE TABLE public.category (
+	    category_id integer DEFAULT nextval('public.category_category_id_seq'::regclass) NOT NULL,
+	    name character varying(25) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.767 +03 [24756] LOG:  statement: CREATE SEQUENCE public.film_film_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.768 +03 [24756] LOG:  statement: CREATE TABLE public.film (
+	    film_id integer DEFAULT nextval('public.film_film_id_seq'::regclass) NOT NULL,
+	    title character varying(255) NOT NULL,
+	    description text,
+	    release_year public.year,
+	    language_id smallint NOT NULL,
+	    rental_duration smallint DEFAULT 3 NOT NULL,
+	    rental_rate numeric(4,2) DEFAULT 4.99 NOT NULL,
+	    length smallint,
+	    replacement_cost numeric(5,2) DEFAULT 19.99 NOT NULL,
+	    rating public.mpaa_rating DEFAULT 'G'::public.mpaa_rating,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL,
+	    special_features text[],
+	    fulltext tsvector NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.771 +03 [24756] LOG:  statement: CREATE TABLE public.film_actor (
+	    actor_id smallint NOT NULL,
+	    film_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.772 +03 [24756] LOG:  statement: CREATE TABLE public.film_category (
+	    film_id smallint NOT NULL,
+	    category_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.773 +03 [24756] LOG:  statement: CREATE VIEW public.actor_info AS
+	 SELECT a.actor_id,
+	    a.first_name,
+	    a.last_name,
+	    public.group_concat(DISTINCT (((c.name)::text || ': '::text) || ( SELECT public.group_concat((f.title)::text) AS group_concat
+	           FROM ((public.film f
+	             JOIN public.film_category fc_1 ON ((f.film_id = fc_1.film_id)))
+	             JOIN public.film_actor fa_1 ON ((f.film_id = fa_1.film_id)))
+	          WHERE ((fc_1.category_id = c.category_id) AND (fa_1.actor_id = a.actor_id))
+	          GROUP BY fa_1.actor_id))) AS film_info
+	   FROM (((public.actor a
+	     LEFT JOIN public.film_actor fa ON ((a.actor_id = fa.actor_id)))
+	     LEFT JOIN public.film_category fc ON ((fa.film_id = fc.film_id)))
+	     LEFT JOIN public.category c ON ((fc.category_id = c.category_id)))
+	  GROUP BY a.actor_id, a.first_name, a.last_name;
+	
+	
+	
+2026-06-09 20:15:42.776 +03 [24756] LOG:  statement: CREATE SEQUENCE public.address_address_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.777 +03 [24756] LOG:  statement: CREATE TABLE public.address (
+	    address_id integer DEFAULT nextval('public.address_address_id_seq'::regclass) NOT NULL,
+	    address character varying(50) NOT NULL,
+	    address2 character varying(50),
+	    district character varying(20) NOT NULL,
+	    city_id smallint NOT NULL,
+	    postal_code character varying(10),
+	    phone character varying(20) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.778 +03 [24756] LOG:  statement: CREATE SEQUENCE public.city_city_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.779 +03 [24756] LOG:  statement: CREATE TABLE public.city (
+	    city_id integer DEFAULT nextval('public.city_city_id_seq'::regclass) NOT NULL,
+	    city character varying(50) NOT NULL,
+	    country_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.781 +03 [24756] LOG:  statement: CREATE SEQUENCE public.country_country_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.781 +03 [24756] LOG:  statement: CREATE TABLE public.country (
+	    country_id integer DEFAULT nextval('public.country_country_id_seq'::regclass) NOT NULL,
+	    country character varying(50) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.783 +03 [24756] LOG:  statement: CREATE VIEW public.customer_list AS
+	 SELECT cu.customer_id AS id,
+	    (((cu.first_name)::text || ' '::text) || (cu.last_name)::text) AS name,
+	    a.address,
+	    a.postal_code AS "zip code",
+	    a.phone,
+	    city.city,
+	    country.country,
+	        CASE
+	            WHEN cu.activebool THEN 'active'::text
+	            ELSE ''::text
+	        END AS notes,
+	    cu.store_id AS sid
+	   FROM (((public.customer cu
+	     JOIN public.address a ON ((cu.address_id = a.address_id)))
+	     JOIN public.city ON ((a.city_id = city.city_id)))
+	     JOIN public.country ON ((city.country_id = country.country_id)));
+	
+	
+	
+2026-06-09 20:15:42.784 +03 [24756] LOG:  statement: CREATE VIEW public.film_list AS
+	 SELECT film.film_id AS fid,
+	    film.title,
+	    film.description,
+	    category.name AS category,
+	    film.rental_rate AS price,
+	    film.length,
+	    film.rating,
+	    public.group_concat((((actor.first_name)::text || ' '::text) || (actor.last_name)::text)) AS actors
+	   FROM ((((public.category
+	     LEFT JOIN public.film_category ON ((category.category_id = film_category.category_id)))
+	     LEFT JOIN public.film ON ((film_category.film_id = film.film_id)))
+	     JOIN public.film_actor ON ((film.film_id = film_actor.film_id)))
+	     JOIN public.actor ON ((film_actor.actor_id = actor.actor_id)))
+	  GROUP BY film.film_id, film.title, film.description, category.name, film.rental_rate, film.length, film.rating;
+	
+	
+	
+2026-06-09 20:15:42.785 +03 [24756] LOG:  statement: CREATE SEQUENCE public.inventory_inventory_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.786 +03 [24756] LOG:  statement: CREATE TABLE public.inventory (
+	    inventory_id integer DEFAULT nextval('public.inventory_inventory_id_seq'::regclass) NOT NULL,
+	    film_id smallint NOT NULL,
+	    store_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.788 +03 [24756] LOG:  statement: CREATE SEQUENCE public.language_language_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.789 +03 [24756] LOG:  statement: CREATE TABLE public.language (
+	    language_id integer DEFAULT nextval('public.language_language_id_seq'::regclass) NOT NULL,
+	    name character(20) NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.790 +03 [24756] LOG:  statement: CREATE VIEW public.nicer_but_slower_film_list AS
+	 SELECT film.film_id AS fid,
+	    film.title,
+	    film.description,
+	    category.name AS category,
+	    film.rental_rate AS price,
+	    film.length,
+	    film.rating,
+	    public.group_concat((((upper("substring"((actor.first_name)::text, 1, 1)) || lower("substring"((actor.first_name)::text, 2))) || upper("substring"((actor.last_name)::text, 1, 1))) || lower("substring"((actor.last_name)::text, 2)))) AS actors
+	   FROM ((((public.category
+	     LEFT JOIN public.film_category ON ((category.category_id = film_category.category_id)))
+	     LEFT JOIN public.film ON ((film_category.film_id = film.film_id)))
+	     JOIN public.film_actor ON ((film.film_id = film_actor.film_id)))
+	     JOIN public.actor ON ((film_actor.actor_id = actor.actor_id)))
+	  GROUP BY film.film_id, film.title, film.description, category.name, film.rental_rate, film.length, film.rating;
+	
+	
+	
+2026-06-09 20:15:42.791 +03 [24756] LOG:  statement: CREATE SEQUENCE public.payment_payment_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.792 +03 [24756] LOG:  statement: CREATE TABLE public.payment (
+	    payment_id integer DEFAULT nextval('public.payment_payment_id_seq'::regclass) NOT NULL,
+	    customer_id smallint NOT NULL,
+	    staff_id smallint NOT NULL,
+	    rental_id integer NOT NULL,
+	    amount numeric(5,2) NOT NULL,
+	    payment_date timestamp without time zone NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.793 +03 [24756] LOG:  statement: CREATE TABLE public.pitr_demo_log (
+	    id bigint NOT NULL,
+	    note text,
+	    created_at timestamp with time zone DEFAULT now()
+	);
+	
+	
+	
+2026-06-09 20:15:42.795 +03 [24756] LOG:  statement: CREATE SEQUENCE public.pitr_demo_log_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.796 +03 [24756] LOG:  statement: ALTER SEQUENCE public.pitr_demo_log_id_seq OWNED BY public.pitr_demo_log.id;
+	
+	
+	
+2026-06-09 20:15:42.797 +03 [24756] LOG:  statement: CREATE SEQUENCE public.rental_rental_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.798 +03 [24756] LOG:  statement: CREATE TABLE public.rental (
+	    rental_id integer DEFAULT nextval('public.rental_rental_id_seq'::regclass) NOT NULL,
+	    rental_date timestamp without time zone NOT NULL,
+	    inventory_id integer NOT NULL,
+	    customer_id smallint NOT NULL,
+	    return_date timestamp without time zone,
+	    staff_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.799 +03 [24756] LOG:  statement: CREATE VIEW public.sales_by_film_category AS
+	 SELECT c.name AS category,
+	    sum(p.amount) AS total_sales
+	   FROM (((((public.payment p
+	     JOIN public.rental r ON ((p.rental_id = r.rental_id)))
+	     JOIN public.inventory i ON ((r.inventory_id = i.inventory_id)))
+	     JOIN public.film f ON ((i.film_id = f.film_id)))
+	     JOIN public.film_category fc ON ((f.film_id = fc.film_id)))
+	     JOIN public.category c ON ((fc.category_id = c.category_id)))
+	  GROUP BY c.name
+	  ORDER BY (sum(p.amount)) DESC;
+	
+	
+	
+2026-06-09 20:15:42.800 +03 [24756] LOG:  statement: CREATE SEQUENCE public.staff_staff_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.801 +03 [24756] LOG:  statement: CREATE TABLE public.staff (
+	    staff_id integer DEFAULT nextval('public.staff_staff_id_seq'::regclass) NOT NULL,
+	    first_name character varying(45) NOT NULL,
+	    last_name character varying(45) NOT NULL,
+	    address_id smallint NOT NULL,
+	    email character varying(50),
+	    store_id smallint NOT NULL,
+	    active boolean DEFAULT true NOT NULL,
+	    username character varying(16) NOT NULL,
+	    password character varying(40),
+	    last_update timestamp without time zone DEFAULT now() NOT NULL,
+	    picture bytea
+	);
+	
+	
+	
+2026-06-09 20:15:42.803 +03 [24756] LOG:  statement: CREATE SEQUENCE public.store_store_id_seq
+	    START WITH 1
+	    INCREMENT BY 1
+	    NO MINVALUE
+	    NO MAXVALUE
+	    CACHE 1;
+	
+	
+	
+2026-06-09 20:15:42.804 +03 [24756] LOG:  statement: CREATE TABLE public.store (
+	    store_id integer DEFAULT nextval('public.store_store_id_seq'::regclass) NOT NULL,
+	    manager_staff_id smallint NOT NULL,
+	    address_id smallint NOT NULL,
+	    last_update timestamp without time zone DEFAULT now() NOT NULL
+	);
+	
+	
+	
+2026-06-09 20:15:42.805 +03 [24756] LOG:  statement: CREATE VIEW public.sales_by_store AS
+	 SELECT (((c.city)::text || ','::text) || (cy.country)::text) AS store,
+	    (((m.first_name)::text || ' '::text) || (m.last_name)::text) AS manager,
+	    sum(p.amount) AS total_sales
+	   FROM (((((((public.payment p
+	     JOIN public.rental r ON ((p.rental_id = r.rental_id)))
+	     JOIN public.inventory i ON ((r.inventory_id = i.inventory_id)))
+	     JOIN public.store s ON ((i.store_id = s.store_id)))
+	     JOIN public.address a ON ((s.address_id = a.address_id)))
+	     JOIN public.city c ON ((a.city_id = c.city_id)))
+	     JOIN public.country cy ON ((c.country_id = cy.country_id)))
+	     JOIN public.staff m ON ((s.manager_staff_id = m.staff_id)))
+	  GROUP BY cy.country, c.city, s.store_id, m.first_name, m.last_name
+	  ORDER BY cy.country, c.city;
+	
+	
+	
+2026-06-09 20:15:42.807 +03 [24756] LOG:  statement: CREATE VIEW public.staff_list AS
+	 SELECT s.staff_id AS id,
+	    (((s.first_name)::text || ' '::text) || (s.last_name)::text) AS name,
+	    a.address,
+	    a.postal_code AS "zip code",
+	    a.phone,
+	    city.city,
+	    country.country,
+	    s.store_id AS sid
+	   FROM (((public.staff s
+	     JOIN public.address a ON ((s.address_id = a.address_id)))
+	     JOIN public.city ON ((a.city_id = city.city_id)))
+	     JOIN public.country ON ((city.country_id = country.country_id)));
+	
+	
+	
+2026-06-09 20:15:42.808 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.pitr_demo_log ALTER COLUMN id SET DEFAULT nextval('public.pitr_demo_log_id_seq'::regclass);
+	
+	
+	
+2026-06-09 20:15:42.928 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.actor
+	    ADD CONSTRAINT actor_pkey PRIMARY KEY (actor_id);
+	
+	
+	
+2026-06-09 20:15:42.931 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.address
+	    ADD CONSTRAINT address_pkey PRIMARY KEY (address_id);
+	
+	
+	
+2026-06-09 20:15:42.932 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.category
+	    ADD CONSTRAINT category_pkey PRIMARY KEY (category_id);
+	
+	
+	
+2026-06-09 20:15:42.934 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.city
+	    ADD CONSTRAINT city_pkey PRIMARY KEY (city_id);
+	
+	
+	
+2026-06-09 20:15:42.936 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.country
+	    ADD CONSTRAINT country_pkey PRIMARY KEY (country_id);
+	
+	
+	
+2026-06-09 20:15:42.938 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.customer
+	    ADD CONSTRAINT customer_pkey PRIMARY KEY (customer_id);
+	
+	
+	
+2026-06-09 20:15:42.940 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.film_actor
+	    ADD CONSTRAINT film_actor_pkey PRIMARY KEY (actor_id, film_id);
+	
+	
+	
+2026-06-09 20:15:42.944 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.film_category
+	    ADD CONSTRAINT film_category_pkey PRIMARY KEY (film_id, category_id);
+	
+	
+	
+2026-06-09 20:15:42.946 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.film
+	    ADD CONSTRAINT film_pkey PRIMARY KEY (film_id);
+	
+	
+	
+2026-06-09 20:15:42.949 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.inventory
+	    ADD CONSTRAINT inventory_pkey PRIMARY KEY (inventory_id);
+	
+	
+	
+2026-06-09 20:15:42.952 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.language
+	    ADD CONSTRAINT language_pkey PRIMARY KEY (language_id);
+	
+	
+	
+2026-06-09 20:15:42.954 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.payment
+	    ADD CONSTRAINT payment_pkey PRIMARY KEY (payment_id);
+	
+	
+	
+2026-06-09 20:15:42.958 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.pitr_demo_log
+	    ADD CONSTRAINT pitr_demo_log_pkey PRIMARY KEY (id);
+	
+	
+	
+2026-06-09 20:15:42.960 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.rental
+	    ADD CONSTRAINT rental_pkey PRIMARY KEY (rental_id);
+	
+	
+	
+2026-06-09 20:15:42.967 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.staff
+	    ADD CONSTRAINT staff_pkey PRIMARY KEY (staff_id);
+	
+	
+	
+2026-06-09 20:15:42.969 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.store
+	    ADD CONSTRAINT store_pkey PRIMARY KEY (store_id);
+	
+	
+	
+2026-06-09 20:15:42.971 +03 [24756] LOG:  statement: CREATE INDEX film_fulltext_idx ON public.film USING gist (fulltext);
+	
+	
+	
+2026-06-09 20:15:42.978 +03 [24756] LOG:  statement: CREATE INDEX idx_actor_last_name ON public.actor USING btree (last_name);
+	
+	
+	
+2026-06-09 20:15:42.980 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_address_id ON public.customer USING btree (address_id);
+	
+	
+	
+2026-06-09 20:15:42.982 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_city_id ON public.address USING btree (city_id);
+	
+	
+	
+2026-06-09 20:15:42.983 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_country_id ON public.city USING btree (country_id);
+	
+	
+	
+2026-06-09 20:15:42.985 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_customer_id ON public.payment USING btree (customer_id);
+	
+	
+	
+2026-06-09 20:15:42.989 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_film_id ON public.film_actor USING btree (film_id);
+	
+	
+	
+2026-06-09 20:15:42.993 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_inventory_id ON public.rental USING btree (inventory_id);
+	
+	
+	
+2026-06-09 20:15:43.001 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_language_id ON public.film USING btree (language_id);
+	
+	
+	
+2026-06-09 20:15:43.003 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_rental_id ON public.payment USING btree (rental_id);
+	
+	
+	
+2026-06-09 20:15:43.007 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_staff_id ON public.payment USING btree (staff_id);
+	
+	
+	
+2026-06-09 20:15:43.012 +03 [24756] LOG:  statement: CREATE INDEX idx_fk_store_id ON public.customer USING btree (store_id);
+	
+	
+	
+2026-06-09 20:15:43.014 +03 [24756] LOG:  statement: CREATE INDEX idx_last_name ON public.customer USING btree (last_name);
+	
+	
+	
+2026-06-09 20:15:43.016 +03 [24756] LOG:  statement: CREATE INDEX idx_store_id_film_id ON public.inventory USING btree (store_id, film_id);
+	
+	
+	
+2026-06-09 20:15:43.021 +03 [24756] LOG:  statement: CREATE INDEX idx_title ON public.film USING btree (title);
+	
+	
+	
+2026-06-09 20:15:43.023 +03 [24756] LOG:  statement: CREATE UNIQUE INDEX idx_unq_manager_staff_id ON public.store USING btree (manager_staff_id);
+	
+	
+	
+2026-06-09 20:15:43.025 +03 [24756] LOG:  statement: CREATE UNIQUE INDEX idx_unq_rental_rental_date_inventory_id_customer_id ON public.rental USING btree (rental_date, inventory_id, customer_id);
+	
+	
+	
+2026-06-09 20:15:43.032 +03 [24756] LOG:  statement: CREATE TRIGGER film_fulltext_trigger BEFORE INSERT OR UPDATE ON public.film FOR EACH ROW EXECUTE FUNCTION tsvector_update_trigger('fulltext', 'pg_catalog.english', 'title', 'description');
+	
+	
+	
+2026-06-09 20:15:43.034 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.actor FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.035 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.address FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.035 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.category FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.035 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.city FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.036 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.country FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.036 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.customer FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.036 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.film FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.037 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.film_actor FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.037 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.film_category FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.037 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.inventory FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.038 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.language FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.038 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.rental FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.038 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.staff FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.039 +03 [24756] LOG:  statement: CREATE TRIGGER last_updated BEFORE UPDATE ON public.store FOR EACH ROW EXECUTE FUNCTION public.last_updated();
+	
+	
+	
+2026-06-09 20:15:43.039 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.customer
+	    ADD CONSTRAINT customer_address_id_fkey FOREIGN KEY (address_id) REFERENCES public.address(address_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.043 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.film_actor
+	    ADD CONSTRAINT film_actor_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(actor_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.047 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.film_actor
+	    ADD CONSTRAINT film_actor_film_id_fkey FOREIGN KEY (film_id) REFERENCES public.film(film_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.051 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.film_category
+	    ADD CONSTRAINT film_category_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.category(category_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.053 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.film_category
+	    ADD CONSTRAINT film_category_film_id_fkey FOREIGN KEY (film_id) REFERENCES public.film(film_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.055 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.film
+	    ADD CONSTRAINT film_language_id_fkey FOREIGN KEY (language_id) REFERENCES public.language(language_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.057 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.address
+	    ADD CONSTRAINT fk_address_city FOREIGN KEY (city_id) REFERENCES public.city(city_id);
+	
+	
+	
+2026-06-09 20:15:43.059 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.city
+	    ADD CONSTRAINT fk_city FOREIGN KEY (country_id) REFERENCES public.country(country_id);
+	
+	
+	
+2026-06-09 20:15:43.061 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.inventory
+	    ADD CONSTRAINT inventory_film_id_fkey FOREIGN KEY (film_id) REFERENCES public.film(film_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.065 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.payment
+	    ADD CONSTRAINT payment_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customer(customer_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.069 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.payment
+	    ADD CONSTRAINT payment_rental_id_fkey FOREIGN KEY (rental_id) REFERENCES public.rental(rental_id) ON UPDATE CASCADE ON DELETE SET NULL;
+	
+	
+	
+2026-06-09 20:15:43.074 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.payment
+	    ADD CONSTRAINT payment_staff_id_fkey FOREIGN KEY (staff_id) REFERENCES public.staff(staff_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.078 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.rental
+	    ADD CONSTRAINT rental_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customer(customer_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.081 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.rental
+	    ADD CONSTRAINT rental_inventory_id_fkey FOREIGN KEY (inventory_id) REFERENCES public.inventory(inventory_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.086 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.rental
+	    ADD CONSTRAINT rental_staff_id_key FOREIGN KEY (staff_id) REFERENCES public.staff(staff_id);
+	
+	
+	
+2026-06-09 20:15:43.090 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.staff
+	    ADD CONSTRAINT staff_address_id_fkey FOREIGN KEY (address_id) REFERENCES public.address(address_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.092 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.store
+	    ADD CONSTRAINT store_address_id_fkey FOREIGN KEY (address_id) REFERENCES public.address(address_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.095 +03 [24756] LOG:  statement: ALTER TABLE ONLY public.store
+	    ADD CONSTRAINT store_manager_staff_id_fkey FOREIGN KEY (manager_staff_id) REFERENCES public.staff(staff_id) ON UPDATE CASCADE ON DELETE RESTRICT;
+	
+	
+	
+2026-06-09 20:15:43.319 +03 [25192] LOG:  statement: DROP DATABASE IF EXISTS verify_20260609_201542;
+2026-06-09 20:15:43.329 +03 [18316] LOG:  checkpoint starting: immediate force wait
+2026-06-09 20:15:43.361 +03 [18316] LOG:  checkpoint complete: wrote 3 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 1 recycled; write=0.004 s, sync=0.009 s, total=0.033 s; sync files=4, longest=0.003 s, average=0.003 s; distance=9307 kB, estimate=28967 kB; lsn=0/F5F6D40, redo lsn=0/F5F6CE8
+2026-06-09 20:20:43.363 +03 [18316] LOG:  checkpoint starting: time
+2026-06-09 20:20:43.495 +03 [18316] LOG:  checkpoint complete: wrote 1 buffers (0.0%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.114 s, sync=0.005 s, total=0.133 s; sync files=2, longest=0.003 s, average=0.003 s; distance=1 kB, estimate=26070 kB; lsn=0/F5F72E8, redo lsn=0/F5F7290
