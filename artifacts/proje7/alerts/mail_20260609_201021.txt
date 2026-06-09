@@ -1,0 +1,7 @@
+﻿TO: admin@example.com
+SUBJECT: PG Backup FAIL
+TIME: 2026-06-09 20:10:25
+DATABASE: dvdrental
+MESSAGE: pg_dump failed or backup is too small. exit=1 size_bytes=0
+
+This file simulates an e-mail/webhook alert for the course demo.

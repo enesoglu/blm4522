@@ -1,0 +1,11 @@
+[2026-06-09 20:07:48] START | db=dvdrental | level=full | file=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_full_20260609_200748.dump | backup started
+[2026-06-09 20:07:48] OK | db=dvdrental | level=full | file=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_full_20260609_200748.dump | size_bytes=575234 | duration_sec=0.33
+[2026-06-09 20:09:34] START | db=dvdrental | level=daily | file=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_daily_20260609_200934.dump | backup started
+[2026-06-09 20:09:34] OK | db=dvdrental | level=daily | file=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_daily_20260609_200934.dump | size_bytes=575234 | duration_sec=0.4
+[2026-06-09 20:10:21] START | db=dvdrental | level=fail_test | file=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_fail_test_20260609_201021.dump | backup started
+[2026-06-09 20:10:25] FAIL | db=dvdrental | level=fail_test | file=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_fail_test_20260609_201021.dump | pg_dump failed or backup is too small. exit=1 size_bytes=0
+[2026-06-09 20:13:30] START | db=dvdrental | level=retention_demo | file=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_retention_demo_20260609_201330.dump | backup started
+[2026-06-09 20:13:30] OK | db=dvdrental | level=retention_demo | file=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_retention_demo_20260609_201330.dump | size_bytes=575234 | duration_sec=0.27
+[2026-06-09 20:13:30] RETENTION | db=dvdrental | level=retention_demo | file=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_retention_demo_20260609_201330.dump | deleted_old_backup=dvdrental_daily_old_for_retention.dump
+[2026-06-09 20:15:42] VERIFY_START | db=dvdrental | backup=C:\Users\yildi\projects_db\blm4522\artifacts\proje7\backups\dvdrental_retention_demo_20260609_201330.dump
+[2026-06-09 20:15:43] VERIFY_OK | db=dvdrental | restored_database=verify_20260609_201542 | backup=dvdrental_retention_demo_20260609_201330.dump
